@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,18 @@ from src.commands import PORTED_COMMANDS
 from src.parity_audit import run_parity_audit
 from src.port_manifest import build_port_manifest
 from src.query_engine import QueryEnginePort
+from src.server.web_ui import (
+    PROMPT_PAGE,
+    advertised_urls,
+    bootstrap_prompt_payload,
+    build_overview_payload,
+    claw_prompt_payload,
+    claw_runtime_payload,
+    local_ipv4_addresses,
+    route_prompt_payload,
+    search_commands_payload,
+    search_tools_payload,
+)
 from src.tools import PORTED_TOOLS
 
 
@@ -242,6 +255,88 @@ class PortingWorkspaceTests(unittest.TestCase):
         self.assertIn('Bootstrap Graph', graph_result.stdout)
         self.assertIn('mode=direct-connect', direct_result.stdout)
         self.assertIn('mode=deep-link', deep_link_result.stdout)
+
+    def test_web_ui_payloads_expose_workspace_data(self) -> None:
+        overview = build_overview_payload()
+        self.assertGreaterEqual(overview['manifest']['total_python_files'], 20)
+        self.assertGreaterEqual(overview['commands']['total'], 150)
+        self.assertGreaterEqual(overview['tools']['total'], 100)
+
+        commands = search_commands_payload('review', limit=5)
+        tools = search_tools_payload('MCP', limit=5)
+        route = route_prompt_payload('review MCP tool flow', limit=5)
+        bootstrap = bootstrap_prompt_payload('review MCP tool flow', limit=5)
+
+        self.assertTrue(any('review' in entry['name'].lower() for entry in commands['entries']))
+        self.assertTrue(any('mcp' in entry['name'].lower() for entry in tools['entries']))
+        self.assertTrue(route['matches'])
+        self.assertIn('Prompt:', bootstrap['turn_output'])
+        self.assertIn('Runtime Session', bootstrap['markdown'])
+
+    def test_web_ui_network_helpers_cover_lan_and_local_modes(self) -> None:
+        localhost_urls = advertised_urls('127.0.0.1', 8765)
+        self.assertEqual(localhost_urls, ['http://127.0.0.1:8765'])
+
+        lan_urls = advertised_urls('0.0.0.0', 8765)
+        self.assertTrue(lan_urls)
+        self.assertEqual(lan_urls[0], 'http://127.0.0.1:8765')
+        self.assertTrue(all(url.startswith('http://') for url in lan_urls))
+
+        addresses = local_ipv4_addresses()
+        self.assertTrue(all(not address.startswith('127.') for address in addresses))
+
+    def test_claw_runtime_payload_detects_built_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            binary = repo_root / 'rust' / 'target' / 'debug' / 'claw'
+            binary.parent.mkdir(parents=True)
+            binary.write_text('')
+            runtime = claw_runtime_payload(repo_root)
+            self.assertTrue(runtime['available'])
+            self.assertEqual(runtime['strategy'], 'binary')
+            self.assertTrue(runtime['command_path'].endswith('claw'))
+
+    def test_claw_prompt_payload_uses_binary_and_loads_project_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            rust_root = repo_root / 'rust'
+            binary = rust_root / 'target' / 'debug' / 'claw'
+            binary.parent.mkdir(parents=True)
+            binary.write_text('')
+            (rust_root / '.env').write_text('ANTHROPIC_API_KEY=test-key\\n')
+
+            captured: dict[str, object] = {}
+
+            def fake_runner(command, **kwargs):
+                captured['command'] = command
+                captured['cwd'] = kwargs['cwd']
+                captured['env'] = kwargs['env']
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"message":"live claw ok"}',
+                    stderr='',
+                )
+
+            payload = claw_prompt_payload(
+                'summarize the repo',
+                model='sonnet',
+                permission_mode='read-only',
+                repo_root=repo_root,
+                runner=fake_runner,
+            )
+
+            self.assertTrue(payload['ok'])
+            self.assertEqual(payload['message'], 'live claw ok')
+            self.assertEqual(captured['cwd'], str(rust_root))
+            self.assertIn('--output-format', captured['command'])
+            self.assertEqual(captured['env']['ANTHROPIC_API_KEY'], 'test-key')
+
+    def test_prompt_page_exposes_live_claw_workspace(self) -> None:
+        self.assertIn('Claw Prompt Workspace', PROMPT_PAGE)
+        self.assertIn('/api/claw', PROMPT_PAGE)
+        self.assertIn('Recent Runs', PROMPT_PAGE)
+        self.assertIn('Ctrl+Enter', PROMPT_PAGE)
 
 
 if __name__ == '__main__':

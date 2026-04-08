@@ -40,8 +40,15 @@ impl From<ConfigError> for PromptBuildError {
 pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 /// Human-readable default frontier model name embedded into generated prompts.
 pub const FRONTIER_MODEL_NAME: &str = "Claude Opus 4.6";
-const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
-const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
+const MAX_INSTRUCTION_FILE_CHARS: usize = 2_000;
+const MAX_TOTAL_INSTRUCTION_CHARS: usize = 6_000;
+const MAX_GIT_DIFF_SUMMARY_CHARS: usize = 4_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectContextDetail {
+    Full,
+    Light,
+}
 
 /// Contents of an instruction file included in prompt construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,10 +89,20 @@ impl ProjectContext {
         cwd: impl Into<PathBuf>,
         current_date: impl Into<String>,
     ) -> std::io::Result<Self> {
+        Self::discover_with_git_detail(cwd, current_date, ProjectContextDetail::Full)
+    }
+
+    pub fn discover_with_git_detail(
+        cwd: impl Into<PathBuf>,
+        current_date: impl Into<String>,
+        detail: ProjectContextDetail,
+    ) -> std::io::Result<Self> {
         let mut context = Self::discover(cwd, current_date)?;
         context.git_status = read_git_status(&context.cwd);
-        context.git_diff = read_git_diff(&context.cwd);
-        context.git_context = GitContext::detect(&context.cwd);
+        if detail == ProjectContextDetail::Full {
+            context.git_diff = read_git_diff(&context.cwd);
+            context.git_context = GitContext::detect(&context.cwd);
+        }
         Ok(context)
     }
 }
@@ -257,14 +274,20 @@ fn read_git_status(cwd: &Path) -> Option<String> {
 fn read_git_diff(cwd: &Path) -> Option<String> {
     let mut sections = Vec::new();
 
-    let staged = read_git_output(cwd, &["diff", "--cached"])?;
+    let staged = read_git_output(cwd, &["diff", "--cached", "--stat"])?;
     if !staged.trim().is_empty() {
-        sections.push(format!("Staged changes:\n{}", staged.trim_end()));
+        sections.push(format!(
+            "Staged changes:\n{}",
+            truncate_git_diff_snapshot(staged.trim_end(), MAX_GIT_DIFF_SUMMARY_CHARS)
+        ));
     }
 
-    let unstaged = read_git_output(cwd, &["diff"])?;
+    let unstaged = read_git_output(cwd, &["diff", "--stat"])?;
     if !unstaged.trim().is_empty() {
-        sections.push(format!("Unstaged changes:\n{}", unstaged.trim_end()));
+        sections.push(format!(
+            "Unstaged changes:\n{}",
+            truncate_git_diff_snapshot(unstaged.trim_end(), MAX_GIT_DIFF_SUMMARY_CHARS)
+        ));
     }
 
     if sections.is_empty() {
@@ -272,6 +295,23 @@ fn read_git_diff(cwd: &Path) -> Option<String> {
     } else {
         Some(sections.join("\n\n"))
     }
+}
+
+fn truncate_git_diff_snapshot(content: &str, max_chars: usize) -> String {
+    let content_chars = content.chars().count();
+    if content_chars <= max_chars {
+        return content.to_string();
+    }
+
+    let marker = "\n\n[truncated git diff snapshot]";
+    let marker_chars = marker.chars().count();
+    let target = max_chars.saturating_sub(marker_chars);
+    let mut output = String::new();
+    for ch in content.chars().take(target) {
+        output.push(ch);
+    }
+    output.push_str(marker);
+    output
 }
 
 fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -436,8 +476,25 @@ pub fn load_system_prompt(
     os_name: impl Into<String>,
     os_version: impl Into<String>,
 ) -> Result<Vec<String>, PromptBuildError> {
+    load_system_prompt_with_detail(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        ProjectContextDetail::Full,
+    )
+}
+
+/// Loads config and project context, then renders the system prompt text.
+pub fn load_system_prompt_with_detail(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    detail: ProjectContextDetail,
+) -> Result<Vec<String>, PromptBuildError> {
     let cwd = cwd.into();
-    let project_context = ProjectContext::discover_with_git(&cwd, current_date.into())?;
+    let project_context = ProjectContext::discover_with_git_detail(&cwd, current_date.into(), detail)?;
     let config = ConfigLoader::default_for(&cwd).load()?;
     Ok(SystemPromptBuilder::new()
         .with_os(os_name, os_version)
@@ -522,8 +579,9 @@ fn get_actions_section() -> String {
 mod tests {
     use super::{
         collapse_blank_lines, display_context_path, normalize_instruction_content,
-        render_instruction_content, render_instruction_files, truncate_instruction_content,
-        ContextFile, ProjectContext, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+        render_instruction_content, render_instruction_files, truncate_git_diff_snapshot,
+        truncate_instruction_content, ContextFile, ProjectContext, ProjectContextDetail,
+        SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     };
     use crate::config::ConfigLoader;
     use std::fs;
@@ -860,6 +918,88 @@ mod tests {
         let rendered = truncate_instruction_content(&content, 4_000);
         assert!(rendered.contains("[truncated]"));
         assert!(rendered.chars().count() <= 4_000 + "\n\n[truncated]".chars().count());
+    }
+
+    #[test]
+    fn truncates_git_diff_snapshot_to_budget() {
+        let content = "x".repeat(14_000);
+        let rendered = truncate_git_diff_snapshot(&content, 4_000);
+        assert!(rendered.contains("[truncated git diff snapshot]"));
+        assert_eq!(rendered.chars().count(), 4_000);
+    }
+
+    #[test]
+    fn discover_with_git_truncates_large_diff_snapshot() {
+        let _guard = env_lock();
+        ensure_valid_cwd();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git init should run");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "tests@example.com"])
+            .current_dir(&root)
+            .status()
+            .expect("git config email should run");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Runtime Prompt Tests"])
+            .current_dir(&root)
+            .status()
+            .expect("git config name should run");
+        fs::write(root.join("tracked.txt"), "hello\n").expect("write tracked file");
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add should run");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git commit should run");
+        fs::write(root.join("tracked.txt"), format!("hello\n{}\n", "x".repeat(20_000)))
+            .expect("rewrite tracked file");
+
+        let context =
+            ProjectContext::discover_with_git(&root, "2026-03-31").expect("context should load");
+
+        let diff = context.git_diff.expect("git diff should be present");
+        assert!(diff.contains("Unstaged changes:"));
+        assert!(diff.contains("tracked.txt"));
+        assert!(!diff.contains("[truncated git diff snapshot]"));
+        assert!(diff.chars().count() < 4_200);
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn discover_with_git_light_omits_diff_and_git_context() {
+        let _guard = env_lock();
+        ensure_valid_cwd();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git init should run");
+        fs::write(root.join("tracked.txt"), "hello\n").expect("write tracked file");
+
+        let context = ProjectContext::discover_with_git_detail(
+            &root,
+            "2026-03-31",
+            ProjectContextDetail::Light,
+        )
+        .expect("context should load");
+
+        assert!(context.git_status.is_some());
+        assert!(context.git_diff.is_none());
+        assert!(context.git_context.is_none());
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
     #[test]

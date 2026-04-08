@@ -185,42 +185,59 @@ fn clean_env_cli_reaches_mock_anthropic_service_across_scripted_parity_scenarios
     let captured = runtime.block_on(server.captured_requests());
     assert_eq!(
         captured.len(),
-        21,
-        "twelve scenarios should produce twenty-one requests"
+        42,
+        "twelve scenarios should produce twenty-one message requests plus twenty-one count_tokens preflight requests"
     );
-    assert!(captured
-        .iter()
-        .all(|request| request.path == "/v1/messages"));
     assert!(captured.iter().all(|request| request.stream));
-
-    let scenarios = captured
+    let path_and_scenarios = captured
         .iter()
-        .map(|request| request.scenario.as_str())
+        .map(|request| (request.path.as_str(), request.scenario.as_str()))
         .collect::<Vec<_>>();
     assert_eq!(
-        scenarios,
+        path_and_scenarios,
         vec![
-            "streaming_text",
-            "read_file_roundtrip",
-            "read_file_roundtrip",
-            "grep_chunk_assembly",
-            "grep_chunk_assembly",
-            "write_file_allowed",
-            "write_file_allowed",
-            "write_file_denied",
-            "write_file_denied",
-            "multi_tool_turn_roundtrip",
-            "multi_tool_turn_roundtrip",
-            "bash_stdout_roundtrip",
-            "bash_stdout_roundtrip",
-            "bash_permission_prompt_approved",
-            "bash_permission_prompt_approved",
-            "bash_permission_prompt_denied",
-            "bash_permission_prompt_denied",
-            "plugin_tool_roundtrip",
-            "plugin_tool_roundtrip",
-            "auto_compact_triggered",
-            "token_cost_reporting",
+            ("/v1/messages/count_tokens", "streaming_text"),
+            ("/v1/messages", "streaming_text"),
+            ("/v1/messages/count_tokens", "read_file_roundtrip"),
+            ("/v1/messages", "read_file_roundtrip"),
+            ("/v1/messages/count_tokens", "read_file_roundtrip"),
+            ("/v1/messages", "read_file_roundtrip"),
+            ("/v1/messages/count_tokens", "grep_chunk_assembly"),
+            ("/v1/messages", "grep_chunk_assembly"),
+            ("/v1/messages/count_tokens", "grep_chunk_assembly"),
+            ("/v1/messages", "grep_chunk_assembly"),
+            ("/v1/messages/count_tokens", "write_file_allowed"),
+            ("/v1/messages", "write_file_allowed"),
+            ("/v1/messages/count_tokens", "write_file_allowed"),
+            ("/v1/messages", "write_file_allowed"),
+            ("/v1/messages/count_tokens", "write_file_denied"),
+            ("/v1/messages", "write_file_denied"),
+            ("/v1/messages/count_tokens", "write_file_denied"),
+            ("/v1/messages", "write_file_denied"),
+            ("/v1/messages/count_tokens", "multi_tool_turn_roundtrip"),
+            ("/v1/messages", "multi_tool_turn_roundtrip"),
+            ("/v1/messages/count_tokens", "multi_tool_turn_roundtrip"),
+            ("/v1/messages", "multi_tool_turn_roundtrip"),
+            ("/v1/messages/count_tokens", "bash_stdout_roundtrip"),
+            ("/v1/messages", "bash_stdout_roundtrip"),
+            ("/v1/messages/count_tokens", "bash_stdout_roundtrip"),
+            ("/v1/messages", "bash_stdout_roundtrip"),
+            ("/v1/messages/count_tokens", "bash_permission_prompt_approved"),
+            ("/v1/messages", "bash_permission_prompt_approved"),
+            ("/v1/messages/count_tokens", "bash_permission_prompt_approved"),
+            ("/v1/messages", "bash_permission_prompt_approved"),
+            ("/v1/messages/count_tokens", "bash_permission_prompt_denied"),
+            ("/v1/messages", "bash_permission_prompt_denied"),
+            ("/v1/messages/count_tokens", "bash_permission_prompt_denied"),
+            ("/v1/messages", "bash_permission_prompt_denied"),
+            ("/v1/messages/count_tokens", "plugin_tool_roundtrip"),
+            ("/v1/messages", "plugin_tool_roundtrip"),
+            ("/v1/messages/count_tokens", "plugin_tool_roundtrip"),
+            ("/v1/messages", "plugin_tool_roundtrip"),
+            ("/v1/messages/count_tokens", "auto_compact_triggered"),
+            ("/v1/messages", "auto_compact_triggered"),
+            ("/v1/messages/count_tokens", "token_cost_reporting"),
+            ("/v1/messages", "token_cost_reporting"),
         ]
     );
 
@@ -279,6 +296,87 @@ struct ScenarioRun {
     stdout: String,
 }
 
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\"'\"'"))
+}
+
+fn build_cli_args(case: ScenarioCase) -> Vec<String> {
+    let mut args = vec![
+        "--model".to_string(),
+        "sonnet".to_string(),
+        "--permission-mode".to_string(),
+        case.permission_mode.to_string(),
+        "--output-format=json".to_string(),
+    ];
+
+    if let Some(allowed_tools) = case.allowed_tools {
+        args.push("--allowedTools".to_string());
+        args.push(allowed_tools.to_string());
+    }
+    if let Some(session_id) = case.resume_session {
+        args.push("--resume".to_string());
+        args.push(session_id.to_string());
+    }
+
+    args.push(format!("{SCENARIO_PREFIX}{}", case.name));
+    args
+}
+
+fn configure_case_command(
+    command: &mut Command,
+    case: ScenarioCase,
+    workspace: &HarnessWorkspace,
+    base_url: &str,
+) {
+    command
+        .current_dir(&workspace.root)
+        .env_clear()
+        .env("ANTHROPIC_API_KEY", "test-parity-key")
+        .env("ANTHROPIC_BASE_URL", base_url)
+        .env("CLAW_CONFIG_HOME", &workspace.config_home)
+        .env("HOME", &workspace.home)
+        .env("NO_COLOR", "1")
+        .env("PATH", "/usr/bin:/bin");
+
+    if let Some((key, value)) = case.extra_env {
+        command.env(key, value);
+    }
+}
+
+fn run_case_with_tty_input(
+    case: ScenarioCase,
+    workspace: &HarnessWorkspace,
+    base_url: &str,
+    stdin: &str,
+) -> Output {
+    let command_line = std::iter::once(env!("CARGO_BIN_EXE_claw"))
+        .chain(build_cli_args(case).iter().map(String::as_str))
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut command = Command::new("script");
+    configure_case_command(&mut command, case, workspace, base_url);
+    command
+        .arg("-qfec")
+        .arg(command_line)
+        .arg("/dev/null")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().expect("tty-backed claw should launch");
+    child
+        .stdin
+        .as_mut()
+        .expect("tty stdin should be piped")
+        .write_all(stdin.as_bytes())
+        .expect("tty stdin should write");
+    child
+        .wait_with_output()
+        .expect("tty-backed claw should finish")
+}
+
 #[derive(Debug, Clone)]
 struct ScenarioManifestEntry {
     name: String,
@@ -301,52 +399,14 @@ struct ScenarioReport {
 }
 
 fn run_case(case: ScenarioCase, workspace: &HarnessWorkspace, base_url: &str) -> ScenarioRun {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_claw"));
-    command
-        .current_dir(&workspace.root)
-        .env_clear()
-        .env("ANTHROPIC_API_KEY", "test-parity-key")
-        .env("ANTHROPIC_BASE_URL", base_url)
-        .env("CLAW_CONFIG_HOME", &workspace.config_home)
-        .env("HOME", &workspace.home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args([
-            "--model",
-            "sonnet",
-            "--permission-mode",
-            case.permission_mode,
-            "--output-format=json",
-        ]);
-
-    if let Some(allowed_tools) = case.allowed_tools {
-        command.args(["--allowedTools", allowed_tools]);
-    }
-    if let Some((key, value)) = case.extra_env {
-        command.env(key, value);
-    }
-    if let Some(session_id) = case.resume_session {
-        command.args(["--resume", session_id]);
-    }
-
-    let prompt = format!("{SCENARIO_PREFIX}{}", case.name);
-    command.arg(prompt);
-
     let output = if let Some(stdin) = case.stdin {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("claw should launch");
-        child
-            .stdin
-            .as_mut()
-            .expect("stdin should be piped")
-            .write_all(stdin.as_bytes())
-            .expect("stdin should write");
-        child.wait_with_output().expect("claw should finish")
+        // Permission-prompt scenarios need a TTY so stdin is not consumed as
+        // piped prompt context before the approval prompt is shown.
+        run_case_with_tty_input(case, workspace, base_url, stdin)
     } else {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_claw"));
+        configure_case_command(&mut command, case, workspace, base_url);
+        command.args(build_cli_args(case));
         command.output().expect("claw should launch")
     };
 

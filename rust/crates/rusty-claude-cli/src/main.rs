@@ -44,13 +44,14 @@ use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     check_base_commit, clear_oauth_credentials, format_stale_base_warning, format_usd,
     generate_pkce_pair, generate_state, load_oauth_credentials, load_system_prompt,
-    parse_oauth_callback_request_target, pricing_for_model, resolve_expected_base,
-    resolve_sandbox_status, save_oauth_credentials, ApiClient, ApiRequest, AssistantEvent,
-    CompactionConfig, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage,
-    ConversationRuntime, McpServer, McpServerManager, McpServerSpec, McpTool, MessageRole,
-    ModelPricing, OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest,
-    PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode,
-    RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    load_system_prompt_with_detail, parse_oauth_callback_request_target, pricing_for_model,
+    resolve_expected_base, resolve_sandbox_status, save_oauth_credentials, ApiClient, ApiRequest,
+    AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
+    ConversationMessage, ConversationRuntime, McpServer, McpServerManager, McpServerSpec,
+    McpTool, MessageRole, ModelPricing, OAuthAuthorizationRequest, OAuthConfig,
+    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext,
+    ProjectContextDetail, PromptCacheEvent, ResolvedPermissionMode, RuntimeError, Session,
+    TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -199,14 +200,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             output_format,
             allowed_tools,
             permission_mode,
-            compact: _,
+            compact,
             base_commit,
         } => {
             run_stale_base_preflight(base_commit.as_deref());
             let stdin_context = read_piped_stdin();
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
-            LiveCli::new(model, true, allowed_tools, permission_mode)?
-                .run_turn_with_output(&effective_prompt, output_format, false)?;
+            let context_detail = infer_project_context_detail(&effective_prompt);
+            LiveCli::new_with_context_detail(
+                model,
+                true,
+                allowed_tools,
+                permission_mode,
+                context_detail,
+            )?
+                .run_turn_with_output(&effective_prompt, output_format, compact)?;
         }
         CliAction::Login { output_format } => run_login(output_format)?,
         CliAction::Logout { output_format } => run_logout(output_format)?,
@@ -982,8 +990,29 @@ fn format_connected_line(model: &str) -> String {
 fn filter_tool_specs(
     tool_registry: &GlobalToolRegistry,
     allowed_tools: Option<&AllowedToolSet>,
+    permission_mode: PermissionMode,
 ) -> Vec<ToolDefinition> {
-    tool_registry.definitions(allowed_tools)
+    let visible_tools = tool_registry
+        .permission_specs(allowed_tools)
+        .expect("tool registry permissions should be valid")
+        .into_iter()
+        .filter(|(_, required_permission)| {
+            tool_is_visible_in_mode(permission_mode, *required_permission)
+        })
+        .map(|(name, _)| name)
+        .collect::<AllowedToolSet>();
+
+    tool_registry.definitions(Some(&visible_tools))
+}
+
+fn tool_is_visible_in_mode(
+    active_mode: PermissionMode,
+    required_permission: PermissionMode,
+) -> bool {
+    match active_mode {
+        PermissionMode::Prompt | PermissionMode::Allow => true,
+        _ => active_mode >= required_permission,
+    }
 }
 
 fn parse_system_prompt_args(
@@ -1282,6 +1311,7 @@ fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
     let git_summary = parse_git_workspace_summary(project_context.git_status.as_deref());
     let empty_config = runtime::RuntimeConfig::empty();
     let sandbox_config = config.as_ref().ok().unwrap_or(&empty_config);
+    let (project_context_policy, default_project_context_detail) = project_context_policy_summary();
     let context = StatusContext {
         cwd: cwd.clone(),
         session_path: None,
@@ -1291,6 +1321,8 @@ fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
             .map_or(0, |runtime_config| runtime_config.loaded_entries().len()),
         discovered_config_files: discovered_config.len(),
         memory_file_count: project_context.instruction_files.len(),
+        project_context_policy,
+        default_project_context_detail,
         project_root,
         git_branch,
         git_summary,
@@ -1642,6 +1674,11 @@ fn check_workspace_health(context: &StatusContext) -> DiagnosticCheck {
             "Memory files     {} · config files loaded {}/{}",
             context.memory_file_count, context.loaded_config_files, context.discovered_config_files
         ),
+        format!(
+            "Prompt context   {} · default {}",
+            context.project_context_policy,
+            project_context_detail_label(context.default_project_context_detail)
+        ),
     ])
     .with_data(Map::from_iter([
         ("cwd".to_string(), json!(context.cwd.display().to_string())),
@@ -1665,6 +1702,14 @@ fn check_workspace_health(context: &StatusContext) -> DiagnosticCheck {
         (
             "memory_file_count".to_string(),
             json!(context.memory_file_count),
+        ),
+        (
+            "project_context_policy".to_string(),
+            json!(context.project_context_policy),
+        ),
+        (
+            "default_project_context_detail".to_string(),
+            json!(project_context_detail_label(context.default_project_context_detail)),
         ),
         (
             "loaded_config_files".to_string(),
@@ -2038,6 +2083,7 @@ fn print_system_prompt(
                 "kind": "system-prompt",
                 "message": message,
                 "sections": sections,
+                "diagnostics": system_prompt_diagnostics(&sections),
             }))?
         ),
     }
@@ -2150,6 +2196,8 @@ struct StatusContext {
     loaded_config_files: usize,
     discovered_config_files: usize,
     memory_file_count: usize,
+    project_context_policy: String,
+    default_project_context_detail: ProjectContextDetail,
     project_root: Option<PathBuf>,
     git_branch: Option<String>,
     git_summary: GitWorkspaceSummary,
@@ -3296,13 +3344,14 @@ impl HookAbortMonitor {
 }
 
 impl LiveCli {
-    fn new(
+    fn new_with_context_detail(
         model: String,
         enable_tools: bool,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
+        context_detail: ProjectContextDetail,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let system_prompt = build_system_prompt()?;
+        let system_prompt = build_system_prompt(context_detail)?;
         let session_state = Session::new();
         let session = create_managed_session_handle(&session_state.session_id)?;
         let runtime = build_runtime(
@@ -3327,6 +3376,21 @@ impl LiveCli {
         };
         cli.persist_session()?;
         Ok(cli)
+    }
+
+    fn new(
+        model: String,
+        enable_tools: bool,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_context_detail(
+            model,
+            enable_tools,
+            allowed_tools,
+            permission_mode,
+            ProjectContextDetail::Light,
+        )
     }
 
     fn startup_banner(&self) -> String {
@@ -4663,6 +4727,8 @@ fn status_json_value(
             "loaded_config_files": context.loaded_config_files,
             "discovered_config_files": context.discovered_config_files,
             "memory_file_count": context.memory_file_count,
+            "project_context_policy": context.project_context_policy,
+            "default_project_context_detail": project_context_detail_label(context.default_project_context_detail),
         },
         "sandbox": {
             "enabled": context.sandbox_status.enabled,
@@ -4694,12 +4760,15 @@ fn status_context(
         parse_git_status_metadata(project_context.git_status.as_deref());
     let git_summary = parse_git_workspace_summary(project_context.git_status.as_deref());
     let sandbox_status = resolve_sandbox_status(runtime_config.sandbox(), &cwd);
+    let (project_context_policy, default_project_context_detail) = project_context_policy_summary();
     Ok(StatusContext {
         cwd,
         session_path: session_path.map(Path::to_path_buf),
         loaded_config_files: runtime_config.loaded_entries().len(),
         discovered_config_files,
         memory_file_count: project_context.instruction_files.len(),
+        project_context_policy,
+        default_project_context_detail,
         project_root,
         git_branch,
         git_summary,
@@ -4747,6 +4816,7 @@ fn format_status_report(
   Session          {}
   Config files     loaded {}/{}
   Memory files     {}
+  Prompt context   {} (default {})
   Suggested flow   /status → /diff → /commit",
             context.cwd.display(),
             context
@@ -4766,6 +4836,8 @@ fn format_status_report(
             context.loaded_config_files,
             context.discovered_config_files,
             context.memory_file_count,
+            context.project_context_policy,
+            project_context_detail_label(context.default_project_context_detail),
         ),
         format_sandbox_report(&context.sandbox_status),
     ]
@@ -5722,13 +5794,152 @@ fn short_tool_id(id: &str) -> String {
     format!("{prefix}…")
 }
 
-fn build_system_prompt() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    Ok(load_system_prompt(
+fn build_system_prompt(
+    detail: ProjectContextDetail,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    Ok(load_system_prompt_with_detail(
         env::current_dir()?,
         DEFAULT_DATE,
         env::consts::OS,
         "unknown",
+        detail,
     )?)
+}
+
+fn project_context_detail_label(detail: ProjectContextDetail) -> &'static str {
+    match detail {
+        ProjectContextDetail::Full => "full",
+        ProjectContextDetail::Light => "light",
+    }
+}
+
+fn project_context_detail_override() -> Option<ProjectContextDetail> {
+    match env::var("CLAW_PROJECT_CONTEXT_DETAIL") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "light" => Some(ProjectContextDetail::Light),
+            "full" => Some(ProjectContextDetail::Full),
+            "auto" | "" => None,
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
+fn project_context_policy_summary() -> (String, ProjectContextDetail) {
+    match env::var("CLAW_PROJECT_CONTEXT_DETAIL") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "light" => ("light".to_string(), ProjectContextDetail::Light),
+            "full" => ("full".to_string(), ProjectContextDetail::Full),
+            _ => ("auto".to_string(), ProjectContextDetail::Light),
+        },
+        Err(_) => ("auto".to_string(), ProjectContextDetail::Light),
+    }
+}
+
+fn infer_project_context_detail(prompt: &str) -> ProjectContextDetail {
+    if let Some(override_detail) = project_context_detail_override() {
+        return override_detail;
+    }
+
+    let prompt = prompt.to_ascii_lowercase();
+
+    let strong_repo_signals = [
+        "git diff",
+        "pull request",
+        "code review",
+        "review this",
+        "review the",
+        "commit message",
+        "staged changes",
+        "unstaged changes",
+        "cargo.toml",
+        "package.json",
+        "src/",
+        ".rs",
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".json",
+        ".md",
+    ];
+    if strong_repo_signals
+        .iter()
+        .any(|signal| prompt.contains(signal))
+    {
+        return ProjectContextDetail::Full;
+    }
+
+    let weighted_signals = [
+        "commit",
+        "review",
+        "diff",
+        "patch",
+        "edit",
+        "change ",
+        "modify",
+        "refactor",
+        "fix ",
+        "fixes",
+        "bug",
+        "implement",
+        "test ",
+        "tests",
+        "lint",
+        "build",
+        "workspace",
+        "repo",
+        "repository",
+        "codebase",
+        "git ",
+        "branch",
+        "file ",
+        "files ",
+        "function",
+        "module",
+        "crate",
+        "api ",
+        "endpoint",
+        "database",
+        "migration",
+    ];
+    let signal_score = weighted_signals
+        .iter()
+        .filter(|signal| prompt.contains(**signal))
+        .count();
+
+    let has_code_block = prompt.contains("```");
+    let has_path_like_token = prompt.contains('/') || prompt.contains('\\');
+    let long_prompt = prompt.chars().count() > 280;
+
+    if signal_score >= 2 || (signal_score >= 1 && (has_code_block || has_path_like_token || long_prompt)) {
+        ProjectContextDetail::Full
+    } else {
+        ProjectContextDetail::Light
+    }
+}
+
+fn system_prompt_diagnostics(sections: &[String]) -> Value {
+    let total_bytes = sections.iter().map(|section| section.len()).sum::<usize>();
+    let total_lines = sections.iter().map(|section| section.lines().count()).sum::<usize>();
+    let section_stats = sections
+        .iter()
+        .map(|section| {
+            let title = section.lines().next().unwrap_or("").to_string();
+            json!({
+                "title": title,
+                "bytes": section.len(),
+                "lines": section.lines().count(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "total_bytes": total_bytes,
+        "total_lines": total_lines,
+        "section_count": sections.len(),
+        "sections": section_stats,
+    })
 }
 
 fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
@@ -6193,6 +6404,7 @@ fn build_runtime_with_plugin_state(
             enable_tools,
             emit_output,
             allowed_tools.clone(),
+            permission_mode,
             tool_registry.clone(),
             progress_reporter,
         )?,
@@ -6302,6 +6514,7 @@ struct AnthropicRuntimeClient {
     enable_tools: bool,
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
+    permission_mode: PermissionMode,
     tool_registry: GlobalToolRegistry,
     progress_reporter: Option<InternalPromptProgressReporter>,
 }
@@ -6313,6 +6526,7 @@ impl AnthropicRuntimeClient {
         enable_tools: bool,
         emit_output: bool,
         allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
         tool_registry: GlobalToolRegistry,
         progress_reporter: Option<InternalPromptProgressReporter>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -6326,6 +6540,7 @@ impl AnthropicRuntimeClient {
             enable_tools,
             emit_output,
             allowed_tools,
+            permission_mode,
             tool_registry,
             progress_reporter,
         })
@@ -6372,7 +6587,13 @@ impl ApiClient for AnthropicRuntimeClient {
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n")),
             tools: self
                 .enable_tools
-                .then(|| filter_tool_specs(&self.tool_registry, self.allowed_tools.as_ref())),
+                .then(|| {
+                    filter_tool_specs(
+                        &self.tool_registry,
+                        self.allowed_tools.as_ref(),
+                        self.permission_mode,
+                    )
+                }),
             tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
             stream: true,
         };
@@ -7722,18 +7943,20 @@ mod tests {
         format_resume_report, format_status_report, format_tool_call_start, format_tool_result,
         format_ultraplan_report, format_unknown_slash_command,
         format_unknown_slash_command_message, format_user_visible_api_error,
-        merge_prompt_with_stdin, normalize_permission_mode, parse_args, parse_git_status_branch,
-        parse_git_status_metadata_for, parse_git_workspace_summary, permission_policy,
-        print_help_to, push_output_block, render_config_report, render_diff_report,
-        render_diff_report_for, render_memory_report, render_repl_help, render_resume_usage,
-        resolve_model_alias, resolve_model_alias_with_config, resolve_repl_model,
-        resolve_session_reference, response_to_events, resume_supported_slash_commands,
-        run_resume_command, slash_command_completion_candidates_with_sessions, status_context,
-        validate_no_args, write_mcp_server_fixture, CliAction, CliOutputFormat, CliToolExecutor,
-        GitWorkspaceSummary, InternalPromptProgressEvent, InternalPromptProgressState, LiveCli,
-        LocalHelpTopic, SlashCommand, StatusUsage, DEFAULT_MODEL, LATEST_SESSION_REFERENCE,
-        PromptHistoryEntry, render_prompt_history_report, parse_history_count,
-        parse_export_args, render_session_markdown, summarize_tool_payload_for_markdown, short_tool_id,
+        infer_project_context_detail, merge_prompt_with_stdin, normalize_permission_mode,
+        parse_args, parse_git_status_branch, parse_git_status_metadata_for,
+        parse_git_workspace_summary, permission_policy, print_help_to, push_output_block,
+        render_config_report, render_diff_report, render_diff_report_for,
+        render_memory_report, render_prompt_history_report, render_repl_help,
+        render_resume_usage, render_session_markdown, resolve_model_alias,
+        resolve_model_alias_with_config, resolve_repl_model, resolve_session_reference,
+        response_to_events, resume_supported_slash_commands, run_resume_command,
+        slash_command_completion_candidates_with_sessions, status_context, summarize_tool_payload_for_markdown,
+        validate_no_args, write_mcp_server_fixture, CliAction, CliOutputFormat,
+        CliToolExecutor, GitWorkspaceSummary, InternalPromptProgressEvent,
+        InternalPromptProgressState, LiveCli, LocalHelpTopic, PromptHistoryEntry,
+        SlashCommand, StatusUsage, DEFAULT_MODEL, LATEST_SESSION_REFERENCE,
+        parse_export_args, parse_history_count, short_tool_id,
     };
     use api::{ApiError, MessageResponse, OutputContentBlock, Usage};
     use plugins::{
@@ -7741,7 +7964,8 @@ mod tests {
     };
     use runtime::{
         load_oauth_credentials, save_oauth_credentials, AssistantEvent, ConfigLoader, ContentBlock,
-        ConversationMessage, MessageRole, OAuthConfig, PermissionMode, Session, ToolExecutor,
+        ConversationMessage, MessageRole, OAuthConfig, PermissionMode, ProjectContextDetail,
+        Session, ToolExecutor,
     };
     use serde_json::json;
     use std::fs;
@@ -8559,6 +8783,52 @@ mod tests {
     }
 
     #[test]
+    fn infers_light_project_context_for_simple_prompt() {
+        assert_eq!(
+            infer_project_context_detail("Reply with exactly: hello"),
+            ProjectContextDetail::Light
+        );
+    }
+
+    #[test]
+    fn infers_full_project_context_for_repo_work_prompt() {
+        assert_eq!(
+            infer_project_context_detail("review this diff and suggest a commit"),
+            ProjectContextDetail::Full
+        );
+    }
+
+    #[test]
+    fn infers_full_project_context_for_file_path_prompt() {
+        assert_eq!(
+            infer_project_context_detail("Explain src/main.rs and suggest a patch"),
+            ProjectContextDetail::Full
+        );
+    }
+
+    #[test]
+    fn project_context_detail_override_can_force_light() {
+        let _guard = env_lock();
+        std::env::set_var("CLAW_PROJECT_CONTEXT_DETAIL", "light");
+        assert_eq!(
+            infer_project_context_detail("review this diff and suggest a commit"),
+            ProjectContextDetail::Light
+        );
+        std::env::remove_var("CLAW_PROJECT_CONTEXT_DETAIL");
+    }
+
+    #[test]
+    fn project_context_detail_override_can_force_full() {
+        let _guard = env_lock();
+        std::env::set_var("CLAW_PROJECT_CONTEXT_DETAIL", "full");
+        assert_eq!(
+            infer_project_context_detail("Reply with exactly: hello"),
+            ProjectContextDetail::Full
+        );
+        std::env::remove_var("CLAW_PROJECT_CONTEXT_DETAIL");
+    }
+
+    #[test]
     fn parses_login_and_logout_subcommands() {
         assert_eq!(
             parse_args(&["login".to_string()]).expect("login should parse"),
@@ -9006,7 +9276,7 @@ mod tests {
             parse_args(&["help".to_string(), "me".to_string(), "debug".to_string()])
                 .expect("prompt shorthand should still work"),
             CliAction::Prompt {
-                prompt: "$help overview".to_string(),
+                prompt: "help me debug".to_string(),
                 model: DEFAULT_MODEL.to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
@@ -9264,7 +9534,11 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let filtered = filter_tool_specs(&GlobalToolRegistry::builtin(), Some(&allowed));
+        let filtered = filter_tool_specs(
+            &GlobalToolRegistry::builtin(),
+            Some(&allowed),
+            PermissionMode::DangerFullAccess,
+        );
         let names = filtered
             .into_iter()
             .map(|spec| spec.name)
@@ -9274,13 +9548,49 @@ mod tests {
 
     #[test]
     fn filtered_tool_specs_include_plugin_tools() {
-        let filtered = filter_tool_specs(&registry_with_plugin_tool(), None);
+        let filtered = filter_tool_specs(
+            &registry_with_plugin_tool(),
+            None,
+            PermissionMode::DangerFullAccess,
+        );
         let names = filtered
             .into_iter()
             .map(|definition| definition.name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"bash".to_string()));
         assert!(names.contains(&"plugin_echo".to_string()));
+    }
+
+    #[test]
+    fn filtered_tool_specs_hide_inaccessible_tools_in_read_only_mode() {
+        let filtered = filter_tool_specs(
+            &GlobalToolRegistry::builtin(),
+            None,
+            PermissionMode::ReadOnly,
+        );
+        let names = filtered
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(!names.contains(&"bash".to_string()));
+        assert!(!names.contains(&"write_file".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"grep_search".to_string()));
+    }
+
+    #[test]
+    fn filtered_tool_specs_hide_plugin_tools_above_active_permission_mode() {
+        let filtered = filter_tool_specs(
+            &registry_with_plugin_tool(),
+            None,
+            PermissionMode::ReadOnly,
+        );
+        let names = filtered
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(!names.contains(&"plugin_echo".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
     }
 
     #[test]
@@ -9323,7 +9633,9 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>|fork [branch-name]]"));
+        assert!(help.contains(
+            "/session [list|switch <session-id>|fork [branch-name]|delete <session-id> [--force]]"
+        ));
         assert!(help.contains(
             "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
         ));
@@ -9581,6 +9893,8 @@ mod tests {
                 loaded_config_files: 2,
                 discovered_config_files: 3,
                 memory_file_count: 4,
+                project_context_policy: "auto".to_string(),
+                default_project_context_detail: runtime::ProjectContextDetail::Light,
                 project_root: Some(PathBuf::from("/tmp")),
                 git_branch: Some("main".to_string()),
                 git_summary: GitWorkspaceSummary {
@@ -9943,7 +10257,9 @@ UU conflicted.rs",
         let handle = create_managed_session_handle("session-alpha").expect("jsonl handle");
         assert!(handle.path.ends_with("session-alpha.jsonl"));
 
-        let legacy_path = workspace.join(".claw/sessions/legacy.json");
+        let legacy_path = crate::sessions_dir()
+            .expect("sessions dir should resolve")
+            .join("legacy.json");
         std::fs::create_dir_all(
             legacy_path
                 .parent()

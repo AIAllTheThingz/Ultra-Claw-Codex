@@ -165,6 +165,10 @@ fn bootstrap_and_system_prompt_emit_json_when_requested() {
         .as_str()
         .expect("prompt text")
         .contains("interactive agent"));
+    assert!(prompt["diagnostics"]["total_bytes"].as_u64().is_some());
+    assert!(prompt["diagnostics"]["total_lines"].as_u64().is_some());
+    assert!(prompt["diagnostics"]["section_count"].as_u64().is_some());
+    assert!(prompt["diagnostics"]["sections"].is_array());
 }
 
 #[test]
@@ -227,6 +231,8 @@ fn doctor_and_resume_status_emit_json_when_requested() {
         .expect("workspace check");
     assert!(workspace["cwd"].as_str().is_some());
     assert!(workspace["in_git_repo"].is_boolean());
+    assert!(workspace["project_context_policy"].as_str().is_some());
+    assert!(workspace["default_project_context_detail"].as_str().is_some());
 
     let sandbox = checks
         .iter()
@@ -254,6 +260,8 @@ fn doctor_and_resume_status_emit_json_when_requested() {
     );
     assert_eq!(resumed["kind"], "status");
     assert_eq!(resumed["model"], "restored-session");
+    assert!(resumed["workspace"]["project_context_policy"].as_str().is_some());
+    assert!(resumed["workspace"]["default_project_context_detail"].as_str().is_some());
     assert_eq!(resumed["usage"]["messages"], 1);
     assert!(resumed["workspace"]["cwd"].as_str().is_some());
     assert!(resumed["sandbox"]["filesystem_mode"].as_str().is_some());
