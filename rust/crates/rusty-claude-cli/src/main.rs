@@ -990,8 +990,29 @@ fn format_connected_line(model: &str) -> String {
 fn filter_tool_specs(
     tool_registry: &GlobalToolRegistry,
     allowed_tools: Option<&AllowedToolSet>,
+    permission_mode: PermissionMode,
 ) -> Vec<ToolDefinition> {
-    tool_registry.definitions(allowed_tools)
+    let visible_tools = tool_registry
+        .permission_specs(allowed_tools)
+        .expect("tool registry permissions should be valid")
+        .into_iter()
+        .filter(|(_, required_permission)| {
+            tool_is_visible_in_mode(permission_mode, *required_permission)
+        })
+        .map(|(name, _)| name)
+        .collect::<AllowedToolSet>();
+
+    tool_registry.definitions(Some(&visible_tools))
+}
+
+fn tool_is_visible_in_mode(
+    active_mode: PermissionMode,
+    required_permission: PermissionMode,
+) -> bool {
+    match active_mode {
+        PermissionMode::Prompt | PermissionMode::Allow => true,
+        _ => active_mode >= required_permission,
+    }
 }
 
 fn parse_system_prompt_args(
@@ -6383,6 +6404,7 @@ fn build_runtime_with_plugin_state(
             enable_tools,
             emit_output,
             allowed_tools.clone(),
+            permission_mode,
             tool_registry.clone(),
             progress_reporter,
         )?,
@@ -6492,6 +6514,7 @@ struct AnthropicRuntimeClient {
     enable_tools: bool,
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
+    permission_mode: PermissionMode,
     tool_registry: GlobalToolRegistry,
     progress_reporter: Option<InternalPromptProgressReporter>,
 }
@@ -6503,6 +6526,7 @@ impl AnthropicRuntimeClient {
         enable_tools: bool,
         emit_output: bool,
         allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
         tool_registry: GlobalToolRegistry,
         progress_reporter: Option<InternalPromptProgressReporter>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -6516,6 +6540,7 @@ impl AnthropicRuntimeClient {
             enable_tools,
             emit_output,
             allowed_tools,
+            permission_mode,
             tool_registry,
             progress_reporter,
         })
@@ -6562,7 +6587,13 @@ impl ApiClient for AnthropicRuntimeClient {
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n")),
             tools: self
                 .enable_tools
-                .then(|| filter_tool_specs(&self.tool_registry, self.allowed_tools.as_ref())),
+                .then(|| {
+                    filter_tool_specs(
+                        &self.tool_registry,
+                        self.allowed_tools.as_ref(),
+                        self.permission_mode,
+                    )
+                }),
             tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
             stream: true,
         };
@@ -9503,7 +9534,11 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let filtered = filter_tool_specs(&GlobalToolRegistry::builtin(), Some(&allowed));
+        let filtered = filter_tool_specs(
+            &GlobalToolRegistry::builtin(),
+            Some(&allowed),
+            PermissionMode::DangerFullAccess,
+        );
         let names = filtered
             .into_iter()
             .map(|spec| spec.name)
@@ -9513,13 +9548,49 @@ mod tests {
 
     #[test]
     fn filtered_tool_specs_include_plugin_tools() {
-        let filtered = filter_tool_specs(&registry_with_plugin_tool(), None);
+        let filtered = filter_tool_specs(
+            &registry_with_plugin_tool(),
+            None,
+            PermissionMode::DangerFullAccess,
+        );
         let names = filtered
             .into_iter()
             .map(|definition| definition.name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"bash".to_string()));
         assert!(names.contains(&"plugin_echo".to_string()));
+    }
+
+    #[test]
+    fn filtered_tool_specs_hide_inaccessible_tools_in_read_only_mode() {
+        let filtered = filter_tool_specs(
+            &GlobalToolRegistry::builtin(),
+            None,
+            PermissionMode::ReadOnly,
+        );
+        let names = filtered
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(!names.contains(&"bash".to_string()));
+        assert!(!names.contains(&"write_file".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"grep_search".to_string()));
+    }
+
+    #[test]
+    fn filtered_tool_specs_hide_plugin_tools_above_active_permission_mode() {
+        let filtered = filter_tool_specs(
+            &registry_with_plugin_tool(),
+            None,
+            PermissionMode::ReadOnly,
+        );
+        let names = filtered
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(!names.contains(&"plugin_echo".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
     }
 
     #[test]
@@ -9822,6 +9893,8 @@ mod tests {
                 loaded_config_files: 2,
                 discovered_config_files: 3,
                 memory_file_count: 4,
+                project_context_policy: "auto".to_string(),
+                default_project_context_detail: runtime::ProjectContextDetail::Light,
                 project_root: Some(PathBuf::from("/tmp")),
                 git_branch: Some("main".to_string()),
                 git_summary: GitWorkspaceSummary {
