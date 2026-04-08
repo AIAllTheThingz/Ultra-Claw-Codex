@@ -968,7 +968,8 @@ mod tests {
 
         let diff = context.git_diff.expect("git diff should be present");
         assert!(diff.contains("Unstaged changes:"));
-        assert!(diff.contains("[truncated git diff snapshot]"));
+        assert!(diff.contains("tracked.txt"));
+        assert!(!diff.contains("[truncated git diff snapshot]"));
         assert!(diff.chars().count() < 4_200);
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
