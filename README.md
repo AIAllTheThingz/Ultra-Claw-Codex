@@ -5,6 +5,8 @@
   ·
   <a href="./USAGE.md">Usage</a>
   ·
+  <a href="./docs/README.md">Docs</a>
+  ·
   <a href="./rust/README.md">Rust workspace</a>
   ·
   <a href="./PARITY.md">Parity</a>
@@ -52,6 +54,14 @@ cargo build --workspace
 ./target/debug/claw prompt "summarize this repository"
 ```
 
+Project companion web UI:
+
+```bash
+python -m src.main web-ui --port 8765
+# or expose it to your internal network
+python -m src.main web-ui --lan --port 8765
+```
+
 Authenticate with either an API key or the built-in OAuth flow:
 
 ```bash
@@ -71,6 +81,11 @@ cargo test --workspace
 ## Documentation map
 
 - [`USAGE.md`](./USAGE.md) — quick commands, auth, sessions, config, parity harness
+- [`docs/README.md`](./docs/README.md) — documentation hub and reading order
+- [`docs/web-ui.md`](./docs/web-ui.md) — browser UI, LAN hosting, and live `claw` runtime bridge
+- [`docs/development.md`](./docs/development.md) — local development workflow for the Rust and Python surfaces
+- [`docs/architecture.md`](./docs/architecture.md) — repository layout and runtime boundaries
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contribution workflow, testing, and repo hygiene
 - [`rust/README.md`](./rust/README.md) — crate map, CLI surface, features, workspace layout
 - [`PARITY.md`](./PARITY.md) — parity status for the Rust port
 - [`rust/MOCK_PARITY_HARNESS.md`](./rust/MOCK_PARITY_HARNESS.md) — deterministic mock-service harness details

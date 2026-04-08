@@ -43,6 +43,22 @@ cd rust
 /doctor
 ```
 
+### Browser UI for the mirrored workspace
+
+```bash
+python -m src.main web-ui --port 8765
+```
+
+Open `http://127.0.0.1:8765` to browse the mirrored command and tool inventories, route prompts, preview bootstrap sessions, and run one-shot prompts against the real Rust `claw` binary when it is available under `rust/target/debug/claw`.
+
+To expose the UI to your LAN:
+
+```bash
+python -m src.main web-ui --lan --port 8765
+```
+
+The UI will advertise both `127.0.0.1` and any detected local IPv4 addresses. See [`docs/web-ui.md`](./docs/web-ui.md) for the full workflow and security notes.
+
 ### Interactive REPL
 
 ```bash
@@ -315,6 +331,12 @@ cargo run -p mock-anthropic-service -- --bind 127.0.0.1:0
 ```bash
 cd rust
 cargo test --workspace
+```
+
+For the Python companion workspace and web UI helpers:
+
+```bash
+python -m unittest tests.test_porting_workspace
 ```
 
 ## Workspace overview

@@ -12,6 +12,7 @@ from .port_manifest import build_port_manifest
 from .query_engine import QueryEnginePort
 from .remote_runtime import run_remote_mode, run_ssh_mode, run_teleport_mode
 from .runtime import PortRuntime
+from .server.web_ui import run_web_ui
 from .session_store import load_session
 from .setup import run_setup
 from .tool_pool import assemble_tool_pool
@@ -88,6 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
     exec_tool_parser = subparsers.add_parser('exec-tool', help='execute a mirrored tool shim by exact name')
     exec_tool_parser.add_argument('name')
     exec_tool_parser.add_argument('payload')
+
+    web_ui_parser = subparsers.add_parser('web-ui', help='launch the lightweight web dashboard for the Python porting workspace')
+    web_ui_parser.add_argument('--host', default='127.0.0.1')
+    web_ui_parser.add_argument('--port', type=int, default=8765)
+    web_ui_parser.add_argument('--lan', action='store_true', help='bind the server to 0.0.0.0 for internal network access')
+    web_ui_parser.add_argument('--open-browser', action='store_true')
     return parser
 
 
@@ -205,6 +212,9 @@ def main(argv: list[str] | None = None) -> int:
         result = execute_tool(args.name, args.payload)
         print(result.message)
         return 0 if result.handled else 1
+    if args.command == 'web-ui':
+        host = '0.0.0.0' if args.lan else args.host
+        return run_web_ui(host=host, port=args.port, open_browser=args.open_browser)
     parser.error(f'unknown command: {args.command}')
     return 2
 
