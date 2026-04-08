@@ -11,6 +11,7 @@ from src.parity_audit import run_parity_audit
 from src.port_manifest import build_port_manifest
 from src.query_engine import QueryEnginePort
 from src.server.web_ui import (
+    PROMPT_PAGE,
     advertised_urls,
     bootstrap_prompt_payload,
     build_overview_payload,
@@ -330,6 +331,12 @@ class PortingWorkspaceTests(unittest.TestCase):
             self.assertEqual(captured['cwd'], str(rust_root))
             self.assertIn('--output-format', captured['command'])
             self.assertEqual(captured['env']['ANTHROPIC_API_KEY'], 'test-key')
+
+    def test_prompt_page_exposes_live_claw_workspace(self) -> None:
+        self.assertIn('Claw Prompt Workspace', PROMPT_PAGE)
+        self.assertIn('/api/claw', PROMPT_PAGE)
+        self.assertIn('Recent Runs', PROMPT_PAGE)
+        self.assertIn('Ctrl+Enter', PROMPT_PAGE)
 
 
 if __name__ == '__main__':

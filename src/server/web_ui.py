@@ -277,6 +277,9 @@ HTML_PAGE = """<!doctype html>
       <div class="eyebrow">Claw Code</div>
       <h1>Control<br>Room</h1>
       <p class="lede">A web surface for the Python porting workspace: browse mirrored commands and tools, route prompts, and preview runtime sessions from one place.</p>
+      <div class="toolbar">
+        <button onclick="window.location.href='/prompt'">Open Prompt Page</button>
+      </div>
       <div class="stats" id="stats"></div>
       <div class="list" id="modules"></div>
     </aside>
@@ -498,6 +501,561 @@ HTML_PAGE = """<!doctype html>
 """
 
 
+PROMPT_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claw Prompt Workspace</title>
+  <style>
+    :root {
+      --bg: #f2eee6;
+      --panel: rgba(255, 252, 246, 0.94);
+      --ink: #171411;
+      --muted: #6b6258;
+      --accent: #c65a2f;
+      --accent-strong: #a6401e;
+      --accent-soft: rgba(198, 90, 47, 0.12);
+      --line: rgba(23, 20, 17, 0.1);
+      --shadow: 0 24px 70px rgba(69, 43, 19, 0.14);
+      --response: #f2e2c5;
+      --ok: #244a3d;
+      --warn: #7f4c15;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+      background:
+        radial-gradient(circle at top left, rgba(198, 90, 47, 0.16), transparent 30%),
+        radial-gradient(circle at bottom right, rgba(36, 74, 61, 0.14), transparent 28%),
+        linear-gradient(180deg, #faf6ed 0%, var(--bg) 100%);
+    }
+
+    .page {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 24px auto 40px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    .hero {
+      padding: 28px;
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--accent-strong);
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+
+    h1, h2, h3, p {
+      margin-top: 0;
+    }
+
+    h1 {
+      font-size: clamp(34px, 5vw, 62px);
+      line-height: 0.94;
+      margin-bottom: 14px;
+    }
+
+    .lede, .muted, .meta-row {
+      color: var(--muted);
+    }
+
+    .hero-panel,
+    .section {
+      padding: 22px;
+    }
+
+    .hero-panel {
+      background: rgba(255, 255, 255, 0.62);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .toolbar.push {
+      justify-content: space-between;
+    }
+
+    input, textarea, button, select {
+      font: inherit;
+    }
+
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid rgba(23, 20, 17, 0.14);
+      border-radius: 18px;
+      padding: 14px 16px;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.78);
+    }
+
+    textarea {
+      min-height: 220px;
+      resize: vertical;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      padding: 12px 20px;
+      cursor: pointer;
+      transition: transform 140ms ease, background 140ms ease;
+    }
+
+    button.secondary {
+      background: #244a3d;
+    }
+
+    button.ghost {
+      background: rgba(23, 20, 17, 0.08);
+      color: var(--ink);
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      background: var(--accent-strong);
+    }
+
+    button.secondary:hover {
+      background: #1d3d32;
+    }
+
+    button.ghost:hover {
+      background: rgba(23, 20, 17, 0.14);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 20px;
+    }
+
+    .control-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      margin: 16px 0 18px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 8px 14px;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      font-size: 13px;
+    }
+
+    .status-pill.ok {
+      background: rgba(36, 74, 61, 0.12);
+      color: var(--ok);
+    }
+
+    .status-pill.warn {
+      background: rgba(127, 76, 21, 0.14);
+      color: var(--warn);
+    }
+
+    .prompt-shell {
+      display: grid;
+      gap: 16px;
+    }
+
+    .response-shell {
+      display: grid;
+      gap: 14px;
+    }
+
+    .response-box,
+    .history-item,
+    .preset {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.58);
+    }
+
+    .response-box {
+      min-height: 300px;
+      padding: 18px;
+      background: var(--response);
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+    }
+
+    .history-list,
+    .preset-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .history-item,
+    .preset {
+      padding: 14px 16px;
+    }
+
+    .history-item button,
+    .preset button {
+      margin-top: 10px;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .meta-row {
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      padding: 12px 14px;
+      background: rgba(255, 255, 255, 0.55);
+    }
+
+    .meta-row strong {
+      display: block;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+
+    .subtle-link {
+      color: var(--accent-strong);
+      text-decoration: none;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    @media (max-width: 980px) {
+      .hero,
+      .grid,
+      .control-grid,
+      .meta-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="card hero">
+      <div>
+        <div class="eyebrow">Claw Prompt Workspace</div>
+        <h1>Type a prompt.<br>Get a real response.</h1>
+        <p class="lede">This page is purpose-built for actually talking to `claw`, not browsing internals. It uses the live Rust runtime behind the scenes and returns the real response in the browser.</p>
+        <div class="toolbar">
+          <a class="subtle-link" href="/">Back to control room</a>
+        </div>
+      </div>
+      <div class="hero-panel">
+        <div class="eyebrow">Runtime Status</div>
+        <div id="runtime-badge" class="status-pill">Checking live runtime...</div>
+        <p class="muted" id="runtime-caption" style="margin-top: 14px;">Looking for a built `claw` binary or a cargo fallback.</p>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card section">
+        <div class="eyebrow">Prompt Composer</div>
+        <div class="prompt-shell">
+          <textarea id="prompt-input" placeholder="Ask claw to summarize code, inspect a workflow, draft text, or answer a question.">Summarize what this repository does and call out the major runtime surfaces.</textarea>
+          <div class="control-grid">
+            <div>
+              <div class="eyebrow">Model</div>
+              <input id="prompt-model" value="sonnet" placeholder="sonnet">
+            </div>
+            <div>
+              <div class="eyebrow">Permission Mode</div>
+              <select id="prompt-permission">
+                <option value="read-only" selected>read-only</option>
+                <option value="workspace-write">workspace-write</option>
+                <option value="danger-full-access">danger-full-access</option>
+              </select>
+            </div>
+            <div>
+              <div class="eyebrow">Delivery</div>
+              <input id="prompt-label" value="One-shot browser run" placeholder="Optional label">
+            </div>
+          </div>
+          <div class="toolbar push">
+            <div class="toolbar">
+              <button id="send-prompt">Send Prompt</button>
+              <button id="clear-prompt" class="ghost">Clear</button>
+            </div>
+            <div class="muted">Tip: `Ctrl+Enter` sends the prompt.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card section">
+        <div class="eyebrow">Prompt Starters</div>
+        <div class="preset-list">
+          <div class="preset">
+            <strong>Codebase summary</strong>
+            <div class="muted">Get a fast map of the project and its major components.</div>
+            <button class="ghost" data-preset="Summarize this repository and explain the main runtime surfaces.">Use Prompt</button>
+          </div>
+          <div class="preset">
+            <strong>Workflow review</strong>
+            <div class="muted">Ask for a practical review of a subsystem or flow.</div>
+            <button class="ghost" data-preset="Review the current web UI flow and suggest the next highest-value UX improvement.">Use Prompt</button>
+          </div>
+          <div class="preset">
+            <strong>Docs draft</strong>
+            <div class="muted">Generate release notes, summaries, or contributor guidance.</div>
+            <button class="ghost" data-preset="Draft concise release notes for the latest branch changes in this repository.">Use Prompt</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card section">
+        <div class="eyebrow">Response</div>
+        <div class="response-shell">
+          <div id="response-status" class="status-pill">Waiting for a prompt.</div>
+          <div class="response-box" id="response-output">Your response will appear here.</div>
+          <div class="meta-grid">
+            <div class="meta-row">
+              <strong>Runtime</strong>
+              <span id="response-runtime">Not run yet</span>
+            </div>
+            <div class="meta-row">
+              <strong>Duration</strong>
+              <span id="response-duration">Not run yet</span>
+            </div>
+            <div class="meta-row">
+              <strong>Model</strong>
+              <span id="response-model">Not run yet</span>
+            </div>
+            <div class="meta-row">
+              <strong>Tokens</strong>
+              <span id="response-tokens">Not run yet</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card section">
+        <div class="eyebrow">Recent Runs</div>
+        <div id="history-list" class="history-list">
+          <div class="empty">Recent prompts will appear here after you run them.</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const HISTORY_KEY = "claw-web-ui-history";
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `Request failed: ${response.status}`);
+      }
+      return response.json();
+    }
+
+    function setBadge(message, kind = "") {
+      const badge = document.getElementById("response-status");
+      badge.textContent = message;
+      badge.className = `status-pill ${kind}`.trim();
+    }
+
+    function setRuntimeBadge(message, caption, kind = "") {
+      const badge = document.getElementById("runtime-badge");
+      badge.textContent = message;
+      badge.className = `status-pill ${kind}`.trim();
+      document.getElementById("runtime-caption").textContent = caption;
+    }
+
+    function loadHistory() {
+      try {
+        return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+      } catch {
+        return [];
+      }
+    }
+
+    function saveHistory(entries) {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 6)));
+    }
+
+    function renderHistory() {
+      const history = loadHistory();
+      const list = document.getElementById("history-list");
+      list.innerHTML = "";
+      if (!history.length) {
+        list.innerHTML = '<div class="empty">Recent prompts will appear here after you run them.</div>';
+        return;
+      }
+
+      for (const entry of history) {
+        const item = document.createElement("div");
+        item.className = "history-item";
+        item.innerHTML = `
+          <strong>${entry.label}</strong>
+          <div class="muted" style="margin-top: 6px;">${entry.prompt}</div>
+          <div class="muted" style="margin-top: 8px;">${entry.model} · ${entry.permission_mode} · ${entry.duration_ms} ms</div>
+          <button class="ghost">Reuse Prompt</button>
+        `;
+        item.querySelector("button").addEventListener("click", () => {
+          document.getElementById("prompt-input").value = entry.prompt;
+          document.getElementById("prompt-model").value = entry.model;
+          document.getElementById("prompt-permission").value = entry.permission_mode;
+          document.getElementById("prompt-label").value = entry.label;
+        });
+        list.appendChild(item);
+      }
+    }
+
+    async function loadOverview() {
+      const payload = await fetchJson("/api/overview");
+      const claw = payload.claw_runtime;
+      if (claw.available) {
+        setRuntimeBadge(
+          `Live claw ready via ${claw.strategy}`,
+          `Using ${claw.command_path}`,
+          "ok"
+        );
+      } else {
+        setRuntimeBadge(
+          "Live claw unavailable",
+          claw.reason || "No runtime found.",
+          "warn"
+        );
+      }
+    }
+
+    function applyPayload(payload) {
+      const raw = payload.raw_output || {};
+      const usage = raw.usage || {};
+      document.getElementById("response-output").textContent =
+        payload.message || payload.stdout || payload.stderr || JSON.stringify(payload, null, 2);
+      document.getElementById("response-runtime").textContent =
+        payload.runtime ? `${payload.runtime.strategy} at ${payload.runtime.command_path}` : "Unavailable";
+      document.getElementById("response-duration").textContent = `${payload.duration_ms || 0} ms`;
+      document.getElementById("response-model").textContent = raw.model || payload.model || "Unknown";
+      const inputTokens = usage.input_tokens ?? "n/a";
+      const outputTokens = usage.output_tokens ?? "n/a";
+      document.getElementById("response-tokens").textContent = `${inputTokens} in / ${outputTokens} out`;
+    }
+
+    async function sendPrompt() {
+      const prompt = document.getElementById("prompt-input").value.trim();
+      const model = document.getElementById("prompt-model").value.trim() || "sonnet";
+      const permissionMode = document.getElementById("prompt-permission").value.trim() || "read-only";
+      const label = document.getElementById("prompt-label").value.trim() || "Browser prompt";
+
+      if (!prompt) {
+        setBadge("Enter a prompt before sending it.", "warn");
+        return;
+      }
+
+      setBadge("Running prompt through live claw...", "");
+      document.getElementById("response-output").textContent = "Waiting for response...";
+
+      const payload = await fetchJson("/api/claw", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          model,
+          permission_mode: permissionMode,
+        }),
+      });
+
+      applyPayload(payload);
+      setBadge(`Response delivered in ${payload.duration_ms} ms.`, payload.ok ? "ok" : "warn");
+
+      const history = loadHistory();
+      history.unshift({
+        label,
+        prompt,
+        model,
+        permission_mode: permissionMode,
+        duration_ms: payload.duration_ms || 0,
+      });
+      saveHistory(history);
+      renderHistory();
+    }
+
+    function wirePresets() {
+      for (const button of document.querySelectorAll("[data-preset]")) {
+        button.addEventListener("click", () => {
+          document.getElementById("prompt-input").value = button.dataset.preset || "";
+        });
+      }
+    }
+
+    document.getElementById("send-prompt").addEventListener("click", () => {
+      sendPrompt().catch((error) => {
+        setBadge(error.message, "warn");
+        document.getElementById("response-output").textContent = error.message;
+      });
+    });
+
+    document.getElementById("clear-prompt").addEventListener("click", () => {
+      document.getElementById("prompt-input").value = "";
+      document.getElementById("response-output").textContent = "Your response will appear here.";
+      setBadge("Waiting for a prompt.");
+    });
+
+    document.getElementById("prompt-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        sendPrompt().catch((error) => {
+          setBadge(error.message, "warn");
+          document.getElementById("response-output").textContent = error.message;
+        });
+      }
+    });
+
+    wirePresets();
+    renderHistory();
+    loadOverview().catch((error) => {
+      setRuntimeBadge("Live claw unavailable", error.message, "warn");
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 def _module_to_dict(module: Any) -> dict[str, Any]:
     return asdict(module)
 
@@ -713,6 +1271,9 @@ class ClawWebUiHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send_html(HTML_PAGE)
+            return
+        if parsed.path == "/prompt":
+            self._send_html(PROMPT_PAGE)
             return
         if parsed.path == "/api/overview":
             self._send_json(build_overview_payload())

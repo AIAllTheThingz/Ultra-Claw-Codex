@@ -13,7 +13,8 @@ The UI provides:
 - tool search
 - prompt-routing previews
 - bootstrap/runtime session previews
-- a `Live Claw` panel that runs one-shot prompts through the real Rust CLI when available
+- a dedicated `/prompt` page for entering a prompt and receiving a real response from the Rust CLI
+- a `Live Claw` panel in the control room for one-shot runtime testing
 
 ## Start the UI locally
 
@@ -24,6 +25,7 @@ python -m src.main web-ui --port 8765
 Open:
 
 - `http://127.0.0.1:8765`
+- `http://127.0.0.1:8765/prompt`
 
 ## Expose it to your internal network
 
@@ -39,9 +41,15 @@ Claw Code web UI running at:
   - http://192.168.1.73:8765
 ```
 
+Dedicated prompt page on LAN:
+
+```text
+http://192.168.1.73:8765/prompt
+```
+
 ## Real `claw` runtime bridge
 
-The `Live Claw` panel does not simulate responses. It tries to execute the actual Rust CLI from the repository.
+The browser prompt workflow does not simulate responses. Both the dedicated `/prompt` page and the control-room `Live Claw` panel try to execute the actual Rust CLI from the repository.
 
 Detection order:
 
@@ -95,7 +103,8 @@ cargo build -p rusty-claude-cli
 python -m src.main web-ui --port 8765
 ```
 
-3. Use the `Live Claw` panel with a short prompt such as `Reply with exactly: ready`
+3. Open `http://127.0.0.1:8765/prompt`
+4. Submit a short prompt such as `Reply with exactly: ready`
 
 ## Security notes
 
