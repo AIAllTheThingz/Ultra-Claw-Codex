@@ -25,6 +25,28 @@ RUST_ROOT = REPO_ROOT / "rust"
 DEFAULT_CLAW_MODEL = "sonnet"
 DEFAULT_CLAW_PERMISSION_MODE = "read-only"
 CLAW_TIMEOUT_SECONDS = 90
+TOKEN_PRICING = {
+    "sonnet": {
+        "label": "Claude 4.6 Sonnet (Recommended)",
+        "input_per_million": 3.0,
+        "output_per_million": 15.0,
+    },
+    "opus": {
+        "label": "Claude 4.6 Opus (Highest Capability)",
+        "input_per_million": 5.0,
+        "output_per_million": 25.0,
+    },
+    "haiku": {
+        "label": "Claude 4.5 Haiku (Fastest/Cheapest)",
+        "input_per_million": 1.0,
+        "output_per_million": 5.0,
+    },
+    "sonnet-long-context": {
+        "label": "Long-Context Sonnet (>200K input)",
+        "input_per_million": 6.0,
+        "output_per_million": 22.5,
+    },
+}
 
 
 HTML_PAGE = """<!doctype html>
@@ -736,6 +758,13 @@ PROMPT_PAGE = """<!doctype html>
       gap: 12px;
     }
 
+    .calculator-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
     .meta-row {
       border-radius: 18px;
       border: 1px solid var(--line);
@@ -865,6 +894,14 @@ PROMPT_PAGE = """<!doctype html>
               <strong>Tokens</strong>
               <span id="response-tokens">Not run yet</span>
             </div>
+            <div class="meta-row">
+              <strong>Current Cost</strong>
+              <span id="response-cost">Not run yet</span>
+            </div>
+            <div class="meta-row">
+              <strong>Pricing Tier</strong>
+              <span id="response-pricing-tier">Not run yet</span>
+            </div>
           </div>
         </div>
       </div>
@@ -876,10 +913,51 @@ PROMPT_PAGE = """<!doctype html>
         </div>
       </div>
     </section>
+
+    <section class="card section">
+      <div class="eyebrow">Cost Calculator</div>
+      <h3>Current run and future projection</h3>
+      <p class="muted">Uses your pricing figures as USD per 1M tokens. The current run auto-fills from the last live prompt, then projects future usage from that same token profile.</p>
+      <div class="control-grid">
+        <div>
+          <div class="eyebrow">Projected Runs / Day</div>
+          <input id="projection-runs-per-day" type="number" min="1" value="20">
+        </div>
+        <div>
+          <div class="eyebrow">Projection Days</div>
+          <input id="projection-days" type="number" min="1" value="30">
+        </div>
+        <div>
+          <div class="eyebrow">Pricing Basis</div>
+          <input id="pricing-basis" value="USD per 1M tokens" readonly>
+        </div>
+      </div>
+      <div class="meta-grid">
+        <div class="meta-row">
+          <strong>Projected Daily Cost</strong>
+          <span id="projection-daily">Not run yet</span>
+        </div>
+        <div class="meta-row">
+          <strong>Projected Weekly Cost</strong>
+          <span id="projection-weekly">Not run yet</span>
+        </div>
+        <div class="meta-row">
+          <strong>Projected Monthly Cost</strong>
+          <span id="projection-monthly">Not run yet</span>
+        </div>
+        <div class="meta-row">
+          <strong>Projected Window Cost</strong>
+          <span id="projection-window">Not run yet</span>
+        </div>
+      </div>
+      <div class="calculator-grid" id="pricing-catalog"></div>
+    </section>
   </div>
 
   <script>
     const HISTORY_KEY = "claw-web-ui-history";
+    let pricingCatalog = null;
+    let lastCostEstimate = null;
 
     async function fetchJson(url, options) {
       const response = await fetch(url, options);
@@ -946,6 +1024,11 @@ PROMPT_PAGE = """<!doctype html>
     async function loadOverview() {
       const payload = await fetchJson("/api/overview");
       const claw = payload.claw_runtime;
+      pricingCatalog = payload.pricing || null;
+      if (pricingCatalog) {
+        document.getElementById("pricing-basis").value = pricingCatalog.pricing_unit || pricingCatalog.unit || "USD per 1M tokens";
+        renderPricingCatalog(pricingCatalog);
+      }
       if (claw.available) {
         setRuntimeBadge(
           `Live claw ready via ${claw.strategy}`,
@@ -961,9 +1044,50 @@ PROMPT_PAGE = """<!doctype html>
       }
     }
 
+    function formatUsd(amount) {
+      if (typeof amount !== "number" || Number.isNaN(amount)) {
+        return "n/a";
+      }
+      return `$${amount.toFixed(amount >= 1 ? 2 : 4)}`;
+    }
+
+    function renderPricingCatalog(catalog) {
+      const target = document.getElementById("pricing-catalog");
+      target.innerHTML = "";
+      const tiers = catalog && catalog.tiers ? Object.values(catalog.tiers) : [];
+      for (const tier of tiers) {
+        const card = document.createElement("div");
+        card.className = "meta-row";
+        card.innerHTML = `
+          <strong>${tier.label}</strong>
+          <span>Input ${formatUsd(tier.input_per_million)} / Output ${formatUsd(tier.output_per_million)}</span>
+        `;
+        target.appendChild(card);
+      }
+    }
+
+    function updateProjection() {
+      if (!lastCostEstimate) {
+        return;
+      }
+      const runsPerDay = Math.max(1, parseInt(document.getElementById("projection-runs-per-day").value || "20", 10));
+      const projectionDays = Math.max(1, parseInt(document.getElementById("projection-days").value || "30", 10));
+      const current = lastCostEstimate.total_cost_usd || 0;
+      const daily = current * runsPerDay;
+      const weekly = daily * 7;
+      const monthly = daily * 30;
+      const windowCost = daily * projectionDays;
+      document.getElementById("projection-daily").textContent = formatUsd(daily);
+      document.getElementById("projection-weekly").textContent = formatUsd(weekly);
+      document.getElementById("projection-monthly").textContent = formatUsd(monthly);
+      document.getElementById("projection-window").textContent = `${formatUsd(windowCost)} over ${projectionDays} days`;
+    }
+
     function applyPayload(payload) {
       const raw = payload.raw_output || {};
       const usage = raw.usage || {};
+      const costEstimate = payload.cost_estimate || null;
+      lastCostEstimate = costEstimate;
       document.getElementById("response-output").textContent =
         payload.message || payload.stdout || payload.stderr || JSON.stringify(payload, null, 2);
       document.getElementById("response-runtime").textContent =
@@ -973,6 +1097,11 @@ PROMPT_PAGE = """<!doctype html>
       const inputTokens = usage.input_tokens ?? "n/a";
       const outputTokens = usage.output_tokens ?? "n/a";
       document.getElementById("response-tokens").textContent = `${inputTokens} in / ${outputTokens} out`;
+      document.getElementById("response-cost").textContent =
+        costEstimate ? `${formatUsd(costEstimate.total_cost_usd)} (${formatUsd(costEstimate.input_cost_usd)} in / ${formatUsd(costEstimate.output_cost_usd)} out)` : "Unavailable";
+      document.getElementById("response-pricing-tier").textContent =
+        costEstimate ? costEstimate.tier_label : "Unavailable";
+      updateProjection();
     }
 
     async function sendPrompt() {
@@ -1034,6 +1163,8 @@ PROMPT_PAGE = """<!doctype html>
       document.getElementById("response-output").textContent = "Your response will appear here.";
       setBadge("Waiting for a prompt.");
     });
+    document.getElementById("projection-runs-per-day").addEventListener("input", updateProjection);
+    document.getElementById("projection-days").addEventListener("input", updateProjection);
 
     document.getElementById("prompt-input").addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -1071,6 +1202,7 @@ def build_overview_payload() -> dict[str, Any]:
         "commands": {"total": len(PORTED_COMMANDS)},
         "tools": {"total": len(PORTED_TOOLS)},
         "claw_runtime": claw_runtime_payload(),
+        "pricing": pricing_catalog_payload(),
     }
 
 
@@ -1115,6 +1247,48 @@ def bootstrap_prompt_payload(prompt: str, limit: int = 6) -> dict[str, Any]:
         },
         "persisted_session_path": session.persisted_session_path,
         "markdown": session.as_markdown(),
+    }
+
+
+def pricing_catalog_payload() -> dict[str, Any]:
+    return {
+        "unit": "USD per 1M tokens",
+        "tiers": TOKEN_PRICING,
+        "notes": {
+            "long_context_threshold_input_tokens": 200_000,
+            "default_projection_runs_per_day": 20,
+            "default_projection_days": 30,
+        },
+    }
+
+
+def resolve_pricing_tier(model: str, input_tokens: int) -> str:
+    normalized = (model or "").strip().lower()
+    if input_tokens > 200_000 and ("sonnet" in normalized or normalized == DEFAULT_CLAW_MODEL):
+        return "sonnet-long-context"
+    if "opus" in normalized:
+        return "opus"
+    if "haiku" in normalized:
+        return "haiku"
+    return "sonnet"
+
+
+def estimate_usage_cost(model: str, input_tokens: int, output_tokens: int) -> dict[str, Any]:
+    tier_key = resolve_pricing_tier(model, input_tokens)
+    tier = TOKEN_PRICING[tier_key]
+    input_cost = (input_tokens / 1_000_000) * tier["input_per_million"]
+    output_cost = (output_tokens / 1_000_000) * tier["output_per_million"]
+    total_cost = input_cost + output_cost
+    return {
+        "tier_key": tier_key,
+        "tier_label": tier["label"],
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "input_cost_usd": round(input_cost, 6),
+        "output_cost_usd": round(output_cost, 6),
+        "total_cost_usd": round(total_cost, 6),
+        "unit": "USD",
+        "pricing_unit": "USD per 1M tokens",
     }
 
 
@@ -1209,8 +1383,31 @@ def claw_prompt_payload(
         "stderr": stderr,
         "message": message,
         "raw_output": parsed,
+        "cost_estimate": estimate_usage_cost(
+            raw_model_name(parsed, model),
+            raw_usage_tokens(parsed, "input_tokens"),
+            raw_usage_tokens(parsed, "output_tokens"),
+        ),
         "error": stderr if completed.returncode != 0 else None,
     }
+
+
+def raw_model_name(parsed: Any, fallback_model: str) -> str:
+    if isinstance(parsed, dict):
+        model = parsed.get("model")
+        if isinstance(model, str) and model.strip():
+            return model
+    return fallback_model
+
+
+def raw_usage_tokens(parsed: Any, key: str) -> int:
+    if isinstance(parsed, dict):
+        usage = parsed.get("usage")
+        if isinstance(usage, dict):
+            value = usage.get(key)
+            if isinstance(value, int):
+                return value
+    return 0
 
 
 def _claw_command(

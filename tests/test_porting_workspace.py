@@ -17,6 +17,7 @@ from src.server.web_ui import (
     build_overview_payload,
     claw_prompt_payload,
     claw_runtime_payload,
+    estimate_usage_cost,
     local_ipv4_addresses,
     route_prompt_payload,
     search_commands_payload,
@@ -331,12 +332,26 @@ class PortingWorkspaceTests(unittest.TestCase):
             self.assertEqual(captured['cwd'], str(rust_root))
             self.assertIn('--output-format', captured['command'])
             self.assertEqual(captured['env']['ANTHROPIC_API_KEY'], 'test-key')
+            self.assertEqual(payload['cost_estimate']['tier_key'], 'sonnet')
 
     def test_prompt_page_exposes_live_claw_workspace(self) -> None:
         self.assertIn('Claw Prompt Workspace', PROMPT_PAGE)
         self.assertIn('/api/claw', PROMPT_PAGE)
         self.assertIn('Recent Runs', PROMPT_PAGE)
         self.assertIn('Ctrl+Enter', PROMPT_PAGE)
+        self.assertIn('Cost Calculator', PROMPT_PAGE)
+
+    def test_estimate_usage_cost_uses_expected_pricing_tiers(self) -> None:
+        sonnet = estimate_usage_cost('sonnet', 3200, 1000)
+        self.assertEqual(sonnet['tier_key'], 'sonnet')
+        self.assertGreater(sonnet['total_cost_usd'], 0)
+
+        opus = estimate_usage_cost('claude-opus-4-6', 3200, 1000)
+        self.assertEqual(opus['tier_key'], 'opus')
+        self.assertGreater(opus['total_cost_usd'], sonnet['total_cost_usd'])
+
+        long_context = estimate_usage_cost('claude-sonnet-4-6', 250_000, 2_000)
+        self.assertEqual(long_context['tier_key'], 'sonnet-long-context')
 
 
 if __name__ == '__main__':
